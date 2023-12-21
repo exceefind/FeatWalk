@@ -4,14 +4,12 @@ import time
 import torch
 
 from torch.utils.data import DataLoader
-from util.utils import load_model, set_seed
-from stl_deepbdc import *
+from utils.utils import load_model, set_seed
 from data_load.transform_cfg import *
 import pprint
 from data.datamgr import SetDataManager
-from Few_rec import *
-from WinSA import WinSA_Net
-# from Few_GLF import *
+from methods.FeatWalk import *
+
 DATA_DIR = 'data'
 
 torch.set_num_threads(4)
@@ -32,7 +30,6 @@ def parse_option():
 
     # about model :
     parser.add_argument('--drop_gama', default=0.5, type= float)
-    parser.add_argument('--MLP_2', default=False, action='store_true')
     parser.add_argument("--beta", default=0.01, type=float)
     parser.add_argument('--drop_rate', default=0.5, type=float)
     parser.add_argument('--reduce_dim', default=128, type=int)
@@ -54,11 +51,8 @@ def parse_option():
     parser.add_argument('--n_episodes', type=int, default=1000)
     # parser.add_argument('--n_local_proto', default=3, type=int)
     parser.add_argument('--num_workers', default=2, type=int)
-
     #  test_batch_size is 1  maen  1 episode of fsl
     parser.add_argument('--test_batch_size',default=1)
-
-    parser.add_argument('--deep_emd', default=False, action='store_true')
 
     # setting
     parser.add_argument('--gpu', default=0, type=int)
@@ -80,7 +74,6 @@ def parse_option():
     # parser.add_argument('--no_diag', default=False, action='store_true')
     parser.add_argument('--confusion', default=False, action='store_true')
     parser.add_argument('--n_symmetry_aug', default=1, type=int)
-    parser.add_argument('--metric', default='LR', choices=['LR','DN4'])
     parser.add_argument('--prompt', default=False, action='store_true')
     parser.add_argument('--constrastive', default=False, action='store_true')
     parser.add_argument('--embeding_way', default='BDC', choices=['BDC','GE','protonet','baseline++'])
@@ -96,17 +89,12 @@ def parse_option():
     parser.add_argument('--Loss_ablation', default=3, type=int, choices=[0, 1, 2, 3])
     parser.add_argument('--ablation', default=0, type=int, choices=[0, 1, 2, 3])
     parser.add_argument('--local_scale', default=0.4 , type=float)
-    parser.add_argument('--all_mini',default=False,action='store_true')
     parser.add_argument('--distill', default=False, action='store_true')
     parser.add_argument('--sfc_bs', default=16, type=int)
     parser.add_argument('--alpha', default=0.5 , type=float)
     parser.add_argument('--sim_temperature', default=64 , type=float)
     parser.add_argument('--measure', default='cosine', choices=['cosine','eudist'])
-    parser.add_argument('--softmax_aug', default=False, action='store_true')
-    parser.add_argument('--grid',default=None,nargs='+', type=int)
-    parser.add_argument('--more_classifier',default=None,choices=['SVM','NN'])
-    parser.add_argument('--same_computation',default=None,choices=['cat','mean','max','max_late'])
-    parser.add_argument('--MLP_fc',default=False,action="store_true")
+
 
 
     args = parser.parse_args()
@@ -180,41 +168,20 @@ def main():
                                        **novel_few_shot_params)
         novel_loader = novel_datamgr.get_data_loader(novel_file, aug=False)
         num_classes = 351
-    elif args.dataset == 'skin198':
-        novel_few_shot_params = dict(n_way=args.n_way, n_support=args.n_shot)
-        novel_datamgr = SetDataManager('filelist/skin198', args.img_size, n_query=args.n_queries,
-                                       n_episode=args.n_episodes, json_read=json_file_read,aug_num=args.n_aug_support_samples,args=args,
-                                       **novel_few_shot_params)
-        novel_loader = novel_datamgr.get_data_loader(novel_file, aug=False)
-        num_classes = 198
 
     if args.all_mini:
         num_classes = 100
-    if args.method in ['stl_deepbdc']:
-        model = stl_deepbdc(args, num_classes=num_classes).cuda()
-        # model = stl_deepbdc
-        # print(stl_deepbdc)
-    elif args.method in ['WinSA']:
-        model = WinSA_Net(args,num_classes=num_classes).cuda()
-    else:
-       model = Net_rec(args,num_classes=num_classes).cuda()
-    model.eval()
-    if args.continue_pretrain:
-        if args.my_model :
-            model = model_load(args,model)
-        else:
-            model = load_model(model,os.path.join(args.save_dir,args.distill_model))
+
+    model = Net_rec(args,num_classes=num_classes).cuda()
+    model = load_model(model,os.path.join(args.save_dir,args.distill_model))
 
     print("-"*20+"  start meta test...  "+"-"*20)
-    # model.eval()
-    # gen_test = tqdm.tqdm(meta_test_loader)
     acc_sum = 0
     confidence_sum = 0
     for t in range(args.test_times):
         with torch.no_grad():
             tic = time.time()
             mean, confidence = model.meta_test_loop(novel_loader)
-            # mean, confidence = model.meta_val_loop(None,meta_test_loader,None)
             acc_sum += mean
             confidence_sum += confidence
             print()

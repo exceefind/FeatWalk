@@ -16,19 +16,16 @@ import torch
 import scipy
 from scipy.stats import t
 import network.resnet as resnet
-import network.convnet as convnet
 # from .DN4_module import *
 import random
-from util.loss import *
+from utils.loss import *
 from sklearn.linear_model import LogisticRegression as LR
 # torch.autograd.set_detect_anomaly(True)
-from util.distillation_utils import *
-from util.utils import *
+from utils.distillation_utils import *
+from utils.utils import *
 import math
 from torch.nn.utils.weight_norm import WeightNorm
 
-from util.loss import uniformity_loss
-from collections import Counter
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -36,20 +33,6 @@ train_loss_list = []
 test_loss_list = []
 prototypes_changes_list = []
 
-# 最简单的方式进行匹配： 求各个local -feat 与loca proto的匹配，取个local feat最匹配下的距离，再通过平均的方式确定匹配度量
-def compute_match_scores(x,SFC):
-    # x : local_feat * in_feature
-    # SFC : num_cls * local_proto * in_feature
-    x_norm = torch.norm(x, p=2, dim=1,).unsqueeze(1).expand_as(x)
-    x_ = x.div(x_norm).unsqueeze(0).expand(SFC.shape[0],x.shape[0],x.shape[1]).permute(0,2,1)
-    SFC_norm = torch.norm(SFC, p=2, dim=2).unsqueeze(2).expand_as(SFC)
-    SFC_ = SFC.div(SFC_norm)
-    # print(SFC_)
-    out  = torch.bmm(SFC_ ,x_)
-    # print(torch.max(out,dim=1)[0].shape)
-    score = torch.mean(torch.max(out,dim=1)[0],dim=1)
-    # print(score)
-    return score
 
 def mean_confidence_interval(data, confidence=0.95,multi = 1):
     a = 1.0 * np.array(data)
@@ -58,26 +41,6 @@ def mean_confidence_interval(data, confidence=0.95,multi = 1):
     h = se * t._ppf((1+confidence)/2., n-1)
     return m * multi, h * multi
 
-def Distance_Correlation(latent, control):
-    latent = F.normalize(latent)
-    control = F.normalize(control)
-
-    matrix_a = torch.sqrt(torch.sum(torch.square(latent.unsqueeze(0) - latent.unsqueeze(1)), dim=-1) + 1e-12)
-    matrix_b = torch.sqrt(torch.sum(torch.square(control.unsqueeze(0) - control.unsqueeze(1)), dim=-1) + 1e-12)
-
-    matrix_A = matrix_a - torch.mean(matrix_a, dim=0, keepdims=True) - torch.mean(matrix_a, dim=1,
-                                                                                  keepdims=True) + torch.mean(matrix_a)
-    matrix_B = matrix_b - torch.mean(matrix_b, dim=0, keepdims=True) - torch.mean(matrix_b, dim=1,
-                                                                                  keepdims=True) + torch.mean(matrix_b)
-
-    Gamma_XY = torch.sum(matrix_A * matrix_B) / (matrix_A.shape[0] * matrix_A.shape[1])
-    Gamma_XX = torch.sum(matrix_A * matrix_A) / (matrix_A.shape[0] * matrix_A.shape[1])
-    Gamma_YY = torch.sum(matrix_B * matrix_B) / (matrix_A.shape[0] * matrix_A.shape[1])
-
-    correlation_r = Gamma_XY / torch.sqrt(Gamma_XX * Gamma_YY + 1e-9)
-    # correlation_r = torch.pow(Gamma_XY,2)/(Gamma_XX * Gamma_YY + 1e-9)
-    return correlation_r
-
 def normalize(x):
     norm = x.pow(2).sum(1, keepdim=True).pow(1. / 2)
     out = x.div(norm)
@@ -85,11 +48,6 @@ def normalize(x):
 
 def random_sample(linspace, max_idx, num_sample=5):
     sample_idx = np.random.choice(range(linspace), num_sample)
-    # sample_idx = np.array(random.sample(range(linspace), num_sample))
-
-    # print(sample_idx)
-    # print(len(list(range(0, max_idx, linspace))))
-    # print(np.sort(random.sample(list(np.linspace(0, max_idx, max_idx//num_sample ,endpoint=False,dtype=int)),num_sample)))
     sample_idx += np.sort(random.sample(list(range(0, max_idx, linspace)),num_sample))
     return sample_idx
 
@@ -127,45 +85,6 @@ def Diagvec(x):
     index = I.nonzero(as_tuple = False)
     y = r[:, index].squeeze()
     return y
-
-def getWin_resize(x_img :torch.tensor,level=3,):
-    win_num = 0
-    for i in range(level):
-        win_num += (i+1)**2
-    res = torch.zeros_like(x_img).unsqueeze(-4).repeat(1,win_num,1,1,1)
-    res[:,0,:,:,:] = x_img
-    # 采用chunk,stack,cat 分割的同时进行interpolate
-    for s in range(2,level+1):
-        x = x_img.clone()
-        x_s = torch.stack(x.chunk(s,-2),dim=-4)
-        x_s = torch.cat(x_s.chunk(s,-1),dim=-4)
-        print(x_s.shape)
-        res[:,(s-1)**2:(s-1)**2+s**2] = F.interpolate(x_s,size=(3,84,84))
-    return res.to(x_img.device)
-
-def getWin_resize_move(x_img :torch.tensor,patch_scale=.3,stride = .1,):
-    [num,c,h,w] = x_img.shape
-    ps = math.ceil(h * patch_scale)
-    ms = math.ceil(h * stride)
-    row_num = math.ceil((h-ps)/ms + 1)
-    win_num = row_num ** 2
-
-    res = torch.zeros((num,c,h,w)).unsqueeze(-4).repeat(1,win_num+1,1,1,1)
-    res[:, 0, :, :, :] = x_img
-    n = 1
-    # 采用chunk,stack,cat 分割的同时进行interpolate
-    for i in range(0, row_num):
-        for j in range(0, row_num):
-            # print(x_img[:,:,ms*i:ms*i+ps,ms*j:ms*j+ps].shape)
-            res[:, n] = F.interpolate(x_img[:, :, ms * i:ms * i + ps, ms * j:ms * j + ps], size=(84, 84),mode='bilinear')
-
-            # if np.random.random() > 0.5:
-            #     res[:, n] =F.interpolate(x_img[:,:,ms*i:ms*i+ps,ms*j:ms*j+ps], size=(84, 84), mode='bilinear')
-            # else:
-            #     res[:, n] =F.interpolate(torch.flip(x_img[:,:,ms*i:ms*i+ps,ms*j:ms*j+ps],dims=[-1]), size=(84, 84), mode='bilinear')
-
-            n += 1
-    return res.to(x_img.device)
 
 class reconstruct_layer(nn.Module):
     def __init__(self, in_channels = 128, out_channels=128, p_des=0.2, p_drop = 0.5,skip_connect=True):
@@ -260,54 +179,44 @@ class fusion_module(nn.Module):
 
         return self.fusion(x)
 
-class Rec_Net(nn.Module):
-    def __init__(self,reduce_dim=128):
-        super(Rec_Net, self).__init__()
-        self.rec_layer = reconstruct_layer(in_channels=reduce_dim, out_channels=reduce_dim, ).cuda()
-        self.SFC = nn.Linear(reduce_dim, 5).cuda()
-        self.drop = nn.Dropout(0.5)
-        self.embeding_way='GE'
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+# class Rec_Net(nn.Module):
+#     def __init__(self,reduce_dim=128):
+#         super(Rec_Net, self).__init__()
+#         self.rec_layer = reconstruct_layer(in_channels=reduce_dim, out_channels=reduce_dim, ).cuda()
+#         self.SFC = nn.Linear(reduce_dim, 5).cuda()
+#         self.drop = nn.Dropout(0.5)
+#         self.embeding_way='GE'
+#         self.avg_pool = nn.AdaptiveAvgPool2d(1)
+#
+#     def forward(self,sample_support,sample_support_cons,is_query=False):
+#         rec_map = self.rec_layer(sample_support)
+#         rec_map_cons = self.rec_layer(sample_support_cons)
+#         # ==============================
+#
+#         if self.embeding_way in ['BDC']:
+#             BDC_rec = self.dcov(rec_map)
+#             BDC_rec_cons = self.dcov(rec_map_cons)
+#
+#         else:
+#             BDC_rec = self.avg_pool(rec_map).view(sample_support.shape[0], -1)
+#             BDC_rec_cons = self.avg_pool(rec_map_cons).view(sample_support.shape[0], -1)
+#
+#         spt_norm = torch.norm(BDC_rec, p=2, dim=1).unsqueeze(1).expand_as(BDC_rec)
+#         BDC_norm = BDC_rec.div(spt_norm + 1e-6)
+#
+#         spt_norm = torch.norm(BDC_rec_cons, p=2, dim=1).unsqueeze(1).expand_as(BDC_rec_cons)
+#         BDC_norm_cons = BDC_rec_cons.div(spt_norm + 1e-6)
+#         if is_query:
+#
+#             BDC_x = 0.5 * BDC_norm + 0.5 * (
+#                         1 / 4 * torch.sum(BDC_norm_cons.view(BDC_norm.shape[0],-1,BDC_norm.shape[-1]), dim=1))
+#
+#         else:
+#             BDC_x = (BDC_norm + BDC_norm_cons) / 2
+#             BDC_x = self.drop(BDC_x)
+#         out = self.SFC(BDC_x)
+#         return out
 
-    def forward(self,sample_support,sample_support_cons,is_query=False):
-        rec_map = self.rec_layer(sample_support)
-        rec_map_cons = self.rec_layer(sample_support_cons)
-        # ==============================
-
-        if self.embeding_way in ['BDC']:
-            BDC_rec = self.dcov(rec_map)
-            BDC_rec_cons = self.dcov(rec_map_cons)
-
-        else:
-            BDC_rec = self.avg_pool(rec_map).view(sample_support.shape[0], -1)
-            BDC_rec_cons = self.avg_pool(rec_map_cons).view(sample_support.shape[0], -1)
-
-        spt_norm = torch.norm(BDC_rec, p=2, dim=1).unsqueeze(1).expand_as(BDC_rec)
-        BDC_norm = BDC_rec.div(spt_norm + 1e-6)
-
-        spt_norm = torch.norm(BDC_rec_cons, p=2, dim=1).unsqueeze(1).expand_as(BDC_rec_cons)
-        BDC_norm_cons = BDC_rec_cons.div(spt_norm + 1e-6)
-        if is_query:
-
-            BDC_x = 0.5 * BDC_norm + 0.5 * (
-                        1 / 4 * torch.sum(BDC_norm_cons.view(BDC_norm.shape[0],-1,BDC_norm.shape[-1]), dim=1))
-
-        else:
-            BDC_x = (BDC_norm + BDC_norm_cons) / 2
-            BDC_x = self.drop(BDC_x)
-        out = self.SFC(BDC_x)
-        return out
-
-class MLP(nn.Module):
-    def __init__(self,dim,out_dim,hidden_dim=128):
-        super(MLP, self).__init__()
-        self.fc1 = nn.Linear(dim, hidden_dim)
-        # self.drop = nn.Dropout(0.5)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(hidden_dim,out_dim)
-
-    def forward(self,x):
-        return self.fc2(self.relu(self.fc1(x)))
 
 class Net_rec(nn.Module):
     def __init__(self,params,num_classes = 5,):
@@ -322,12 +231,6 @@ class Net_rec(nn.Module):
         elif params.model == 'resnet18':
             self.backbone = resnet.ResNet18()
             resnet_layer_dim = [64, 128, 256, 512]
-        elif params.model == 'resnet34':
-            self.backbone = resnet.ResNet34(flatten=False)
-            resnet_layer_dim = [64, 128, 256, 512]
-        elif params.model == 'conv64':
-            self.backbone = convnet.ConvNet()
-            resnet_layer_dim = self.backbone.feat_dim
 
         self.resnet_layer_dim = resnet_layer_dim
         self.reduce_dim = params.reduce_dim
@@ -385,9 +288,6 @@ class Net_rec(nn.Module):
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
-
-    def forward(self):
-        pass
 
     def normalize(self,x):
         x = (x - torch.mean(x, dim=1).unsqueeze(1))
@@ -774,38 +674,6 @@ class Net_rec(nn.Module):
 
         score = -torch.pow(x - y, 2).sum(2)
         return score
-
-    def eudist_proto(self,support_z,support_ys,query_z,):
-        # print(support_z.shape)
-        support_z = self.avg_pool(support_z).view(self.n_way * self.params.n_shot, self.params.n_aug_support_samples,-1)
-        print(support_z.shape)
-        support_z_local = torch.mean(support_z[:, 1:self.params.n_aug_support_samples, :],dim=1)
-        query_z = self.avg_pool(query_z).view(self.n_way * self.params.n_queries, self.params.n_symmetry_aug,-1)
-        query_z_local = torch.mean(query_z[:, 1:self.params.n_symmetry_aug, :],dim=1)
-        support_z_fin = 1/2 * (support_z[:,0,:] + support_z_local)
-        query_z_fin = 1/2 * (query_z[:,0,:]+query_z_local)
-
-        support_z_fin = support_z[:, 0, :]
-        query_z_fin = query_z[:, 0, :]
-        z_proto = support_z_fin.contiguous().view(self.n_way, self.n_shot, -1).mean(1)
-
-        return euclidean_dist(query_z_fin,z_proto)
-
-    def LR_rec(self,support_z,support_y):
-        clf = LR(penalty='l2',
-                 random_state=0,
-                 C=self.params.penalty_c,
-                 solver='lbfgs',
-                 max_iter=1000,
-                 multi_class='multinomial')
-        # spt_norm = torch.norm(support_z, p=2, dim=1).unsqueeze(1).expand_as(support_z)
-        # spt_normalized = support_z.div(spt_norm + 1e-6)
-
-        z_support = support_z.detach().cpu().numpy()
-        y_support = support_y.reshape(-1).cpu().numpy()
-
-        clf.fit(z_support, y_support)
-        return clf
 
     # new selective local fusion :
     def softmax(self,support_z,support_ys,query_z,):
@@ -1263,251 +1131,6 @@ class Net_rec(nn.Module):
 
         return out
 
-    def predict_wo_fc(self,support_z,support_ys,query_z,):
-        walk_times = 24
-        alpha = self.params.alpha
-        # print(alpha)
-        iter_num = 100
-        # tempe = 32
-        tempe = 16
-
-
-        if self.params.embeding_way in ['BDC']:
-            support_z = self.dcov(support_z)
-            query_z = self.dcov(query_z)
-
-        else:
-            support_z = self.avg_pool(support_z).view(support_z.shape[0], -1)
-            query_z = self.avg_pool(query_z).view(query_z.shape[0], -1)
-
-        support_ys = support_ys.view(self.n_way * self.n_shot, self.params.n_aug_support_samples, -1)
-        global_ys = support_ys[:, 0, :]
-
-        support_z = support_z.reshape(self.n_way,self.n_shot,self.params.n_aug_support_samples,-1)
-        query_z = query_z.reshape(self.n_way,self.params.n_queries,self.params.n_aug_support_samples,-1)
-
-
-        feat_q = query_z[:,:,0]
-        feat_ql = query_z[:,:,1:]
-        feat_g = support_z[:,:,0]
-        feat_sl = support_z[:,:,1:]
-        # w_local: n * k * n * m
-        num_sample = self.n_way * self.n_shot
-        global_ys = global_ys.view(self.n_way,self.n_shot,-1)
-
-        feat_g = feat_g.detach()
-        feat_sl = feat_sl.detach()
-
-        # feat_sl: n * k * n *  dim
-        I = torch.eye(self.n_way,self.n_way,device=feat_g.device).unsqueeze(0).unsqueeze(1)
-        proto_moving = torch.mean(feat_g, dim=1)
-
-
-        support_x = feat_g.detach()
-        for i in range(iter_num):
-            weight = compute_weight_local(proto_moving.unsqueeze(1), feat_sl, feat_sl, self.params.measure)
-            idx_walk = torch.randperm(self.params.n_aug_support_samples-1,)[:walk_times]
-
-            w_local = F.softmax(weight[:,:,:,idx_walk] * tempe, dim=-1)
-            # print(w_local.shape)
-            feat_s = torch.sum((feat_sl[:,:,idx_walk,:].unsqueeze(-3)) * (w_local.detach().unsqueeze(-1)), dim=-2)
-            # w_local = F.softmax((w_local * 1.5) / tempe, dim=-1)
-            # # print(w_local.shape)
-            # print(w_local[0,0,:,:])
-            # feat_s = torch.sum(feat_sl.unsqueeze(-3) * w_local.detach().unsqueeze(-1), dim=-2)
-            support_x = alpha * feat_g.unsqueeze(-2) + (1- alpha) * feat_s
-            # proto_update = torch.sum(torch.matmul(torch.mean(support_x,dim=1).transpose(1,2),torch.eye(self.n_way,device=proto_moving.device).unsqueeze(0)),dim=-1)
-            proto_update = torch.mean(support_x,dim=1)[range(self.n_way),range(self.n_way)]
-            proto_moving = 0.9 * proto_moving + 0.1 * proto_update
-
-        # print(support_x.shape)
-        support_x = support_x[range(self.n_way),:,range(self.n_way)]
-        # print(support_x.shape)
-
-        if self.params.LR and self.params.more_classifier is None:
-            clf = LR(penalty='l2',
-                     random_state=0,
-                     C=self.params.penalty_c,
-                     solver='lbfgs',
-                     max_iter=1000,
-                     multi_class='multinomial')
-            spt_norm = torch.norm(support_x, p=2, dim=-1).unsqueeze(-1).expand_as(support_x)
-            support_x = support_x.div(spt_norm + 1e-6)
-            y_support = np.repeat(range(self.params.n_way), self.n_shot)
-            support_x = support_x.view(-1,support_x.shape[-1])
-            clf.fit(support_x.detach().cpu().numpy(), y_support)
-        if self.params.more_classifier == 'SVM':
-            clf = make_pipeline(StandardScaler(), SVC(gamma='auto',
-                                                      # C=1,
-                                                      C=self.params.penalty_c,
-                                                      kernel='linear',
-                                                      decision_function_shape='ovr',probability=True))
-            spt_norm = torch.norm(support_x, p=2, dim=-1).unsqueeze(-1).expand_as(support_x)
-            support_x = support_x.div(spt_norm + 1e-6)
-            y_support = np.repeat(range(self.params.n_way), self.n_shot)
-            support_x = support_x.view(-1, support_x.shape[-1])
-            # print(support_x.shape)
-            # print(y_support)
-            clf.fit(support_x.detach().cpu().numpy(),y_support)
-
-
-        w_local = compute_weight_local(proto_moving.unsqueeze(1), feat_ql, feat_sl,self.params.measure)
-        w_local = F.softmax(w_local *  tempe, dim=-1)
-        # feat_sl: n * k * n *  dim
-        feat_lq = torch.sum(feat_ql.unsqueeze(-3) * w_local.unsqueeze(-1), dim=-2)
-        query_x =  alpha * feat_q.unsqueeze(-2) + (1- alpha) * feat_lq
-        # query_x = feat_q
-        # print(w_local[0,0,:,:])
-
-
-        if self.params.LR :
-            spt_norm = torch.norm(query_x, p=2, dim=-1).unsqueeze(-1).expand_as(query_x)
-            query_x = query_x.div(spt_norm + 1e-6)
-            query_x = query_x.view(-1,query_x.shape[-1])
-            out = torch.from_numpy(clf.predict_proba(query_x.detach().cpu().numpy()))
-            # print(out.shape)
-            out = out.view(-1,self.n_way,self.n_way)[:,range(self.n_way),range(self.n_way)]
-            # print(out.shape)
-            _, out = torch.max(out, dim=-1)
-            # print(out.shape)
-        elif self.params.more_classifier == 'SVM':
-            spt_norm = torch.norm(query_x, p=2, dim=-1).unsqueeze(-1).expand_as(query_x)
-            query_x = query_x.div(spt_norm + 1e-6)
-            query_x = query_x.view(-1, query_x.shape[-1])
-            out = torch.from_numpy(clf.predict_proba(query_x.detach().cpu().numpy()))
-            # print(out.shape)
-            # print(out)
-            # out = out.view(-1, self.n_way, self.n_way)[:, range(self.n_way), range(self.n_way)]
-            out = torch.mean(out.view(-1, self.n_way, self.n_way),dim=-2).view(-1, self.n_way)
-            # print(out)
-            _, out = torch.max(out, dim=-1)
-            # print(out)
-        else:
-            proto_moving = proto_moving.unsqueeze(0).unsqueeze(1).unsqueeze(2)
-            query_x = query_x.unsqueeze(-2)
-            # print(query_x.shape)
-            # print(proto_moving.shape)
-            out = -torch.sum((query_x-proto_moving)**2,dim=-1)[:,:,range(self.n_way),range(self.n_way)]
-
-            # proto_moving = proto_moving.unsqueeze(0).unsqueeze(1)
-            # query_x = query_x.unsqueeze(-2)
-            # out = -torch.sum((query_x - proto_moving) ** 2, dim=-1)
-            # print(out.shape)
-
-        return out
-
-    def softmax_aug(self,support_z,support_ys,query_z,):
-        loss_ce_fn = nn.CrossEntropyLoss()
-        batch_size = self.params.sfc_bs
-        walk_times = 24
-        alpha = self.params.alpha
-        tempe = self.params.sim_temperature
-
-        support_ys = support_ys.cuda()
-
-        if self.params.embeding_way in ['BDC']:
-
-            if self.params.MLP_fc:
-                SFC = MLP(self.dim, self.params.n_way,hidden_dim=64).cuda()
-            else:
-                SFC = nn.Linear(self.dim, self.params.n_way).cuda()
-
-            if self.params.optim in ['Adam']:
-                optimizer = torch.optim.Adam([{'params': SFC.parameters()}],lr=self.params.lr, weight_decay=self.params.wd_test)
-                iter_num = 100
-
-                # optimizer = torch.optim.AdamW([{'params': SFC.parameters()}], lr=0.001,
-                #                              weight_decay=0.001,eps=1e-4)
-                optimizer = torch.optim.AdamW([{'params': SFC.parameters()}], lr=0.001,
-                                             weight_decay=self.params.wd_test,eps=1e-4)
-                lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, iter_num * math.ceil(self.n_way*self.n_shot/batch_size),eta_min=1e-3)
-
-            else:
-                # best
-                # optimizer = torch.optim.SGD([{'params':fusion.parameters(),'lr':self.params.lr},{'params': SFC.parameters()}],lr=self.params.lr, momentum=0.9,  weight_decay=self.params.wd_test)
-                optimizer = torch.optim.SGD([{'params': SFC.parameters()},{'params':tempe,'lr':0.0}],lr=self.params.lr, momentum=0.9, nesterov=True, weight_decay=self.params.wd_test)
-                # 1shot : 69.20+-    5shot 85.73
-                lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[60,120,150], gamma=0.1)
-                # lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[60,120], gamma=0.1)
-                iter_num = 180
-        else:
-
-            tempe = 16
-
-            if self.params.embeding_way in ['baseline++']:
-                SFC = nn.Linear(self.reduce_dim, self.params.n_way, bias=False).cuda()
-                WeightNorm.apply(SFC, 'weight', dim=0)
-            else:
-                SFC = nn.Linear(self.reduce_dim, self.params.n_way).cuda()
-
-            if self.params.optim in ['Adam']:
-                # lr = 5e-3
-                optimizer = torch.optim.AdamW([{'params': SFC.parameters()}], lr=0.005,
-                                              weight_decay=self.params.wd_test, eps=5e-3)
-                iter_num = 100
-                lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, iter_num * math.ceil(
-                    self.n_way * self.n_shot / batch_size), eta_min=5e-3)
-
-
-            else:
-                optimizer = torch.optim.SGD([{'params': SFC.parameters()}],
-                                            lr=self.params.lr, momentum=0.9, nesterov=True,
-                                            weight_decay=self.params.wd_test)
-
-                lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[60, 120, 150], gamma=0.1)
-                iter_num = 180
-
-        SFC.train()
-
-        if self.params.embeding_way in ['BDC']:
-            support_z = self.dcov(support_z)
-            query_z = self.dcov(query_z)
-        else:
-            support_z = self.avg_pool(support_z).view(support_z.shape[0], -1)
-            query_z = self.avg_pool(query_z)
-
-        support_ys = support_ys.view(self.n_way * self.n_shot*self.params.n_aug_support_samples, -1)
-
-        support_z = support_z.reshape(self.n_way*self.n_shot*self.params.n_aug_support_samples,-1)
-        query_z = query_z.reshape(self.n_way,self.params.n_queries,self.params.n_aug_support_samples,-1)
-
-        feat_q = query_z[:,:,0].detach()
-        # w_local: n * k * n * m
-        num_sample = self.n_way*self.n_shot*self.params.n_aug_support_samples
-
-        support_x = support_z.detach()
-        spt_norm = torch.norm(support_x, p=2, dim=-1).unsqueeze(-1).expand_as(support_x)
-        support_x = support_x.div(spt_norm + 1e-6)
-
-        for i in range(iter_num):
-            sample_idxs = torch.randperm(num_sample)
-            for j in range(math.ceil(num_sample/batch_size)):
-                idxs = sample_idxs[j*batch_size:min((j+1)*batch_size,num_sample)]
-                x =  support_x[idxs]
-                y = support_ys[idxs]
-                x = self.drop(x)
-                out = SFC(x).view(-1,self.n_way)
-                loss_ce = loss_ce_fn(out,y.long().view(-1))
-                loss = loss_ce
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                if lr_scheduler is not None:
-                    lr_scheduler.step()
-            # print('loss_ce: {:.2f} \t loss_mse: {:.2f}'.format(loss_ce,loss_rec))
-
-
-        SFC.eval()
-
-        # feat_sl: n * k * n *  dim
-        query_x =   feat_q
-        spt_norm = torch.norm(query_x, p=2, dim=-1).unsqueeze(-1).expand_as(query_x)
-        query_x = query_x.div(spt_norm + 1e-6)
-
-        with torch.no_grad():
-            out = SFC(query_x).view(-1,self.n_way)
-        return out
-
     # def softmax(self,support_z,support_ys,query_z,):
     #     # proto : K * D
     #     prototype = torch.zeros((self.params.n_way, self.dim)).cuda()
@@ -1826,50 +1449,3 @@ class Net_rec(nn.Module):
         clf.fit(z_support, y_support)
 
         return torch.from_numpy(clf.predict(z_query))
-
-    def more_classifier(self,support_z,support_ys,query_z,query_ys,classifier):
-        spt_norm = torch.norm(support_z, p=2, dim=1).unsqueeze(1).expand_as(support_z)
-        # spt_norm = torch.sqrt(spt_norm )
-        spt_normalized = support_z.div(spt_norm + 1e-6)
-        qry_norm = torch.norm(query_z, p=2, dim=1).unsqueeze(1).expand_as(query_z)
-        # qry_norm = torch.sqrt(qry_norm )
-        qry_normalized = query_z.div(qry_norm + 1e-6)
-        #
-        z_support = spt_normalized.detach().cpu().numpy()
-        z_query = qry_normalized.detach().cpu().numpy()
-
-        y_support = np.repeat(range(self.params.n_way), self.n_shot)
-        # z_support = support_z.detach().cpu().numpy()
-        # y_support = support_ys.view(-1).cpu().numpy()
-        # z_query = query_z.detach().cpu().numpy()
-
-
-        if classifier == 'SVM':
-            clf = make_pipeline(StandardScaler(), SVC(gamma='auto',
-                                                      C=1,
-                                                      kernel='linear',
-                                                      decision_function_shape='ovr'))
-            clf.fit(z_support, y_support)
-            query_ys_pred = clf.predict(z_query)
-
-        elif classifier == 'NN':
-            query_ys_pred = NN(z_support, support_ys, z_query)
-
-        return torch.from_numpy(query_ys_pred)
-
-def NN(support, support_ys, query):
-    """nearest classifier"""
-    support = np.expand_dims(support.transpose(), 0)
-    query = np.expand_dims(query, 2)
-
-    diff = np.multiply(query - support, query - support)
-    distance = diff.sum(1)
-    min_idx = np.argmin(distance, axis=1)
-    pred = [support_ys[idx] for idx in min_idx]
-    return pred
-
-if __name__ == '__main__':
-    # print(random_sample(5,125,25))
-    # print(random_sample(5, 25, 20))
-    test = torch.randn((25,3,84,84))
-    print(getWin_resize_move(test,patch_scale=0.4,stride=0.1).shape)
