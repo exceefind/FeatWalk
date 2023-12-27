@@ -27,7 +27,6 @@ def parse_option():
     parser.add_argument('--model', default='resnet12',choices=['resnet12', 'resnet18', 'resnet34', 'conv64'])
     parser.add_argument('--img_size', default=84, type=int, choices=[84,128,160,224])
 
-
     # about model :
     parser.add_argument('--drop_gama', default=0.5, type= float)
     parser.add_argument("--beta", default=0.01, type=float)
@@ -37,21 +36,16 @@ def parse_option():
     parser.add_argument('--FPN_list', default=None, nargs='+', type=int)
     parser.add_argument('--flatten_fpn', default=False, action='store_true')
 
-
     # about meta test
     parser.add_argument('--val_freq',default=5,type=int)
-    # parser.add_argument('--local_mode',default='local_mix', choices=['cell', 'local_mix' ,'cell_mix','mask_pool'])
     parser.add_argument('--set', type=str, default='test', choices=['val', 'test'], help='the set for validation')
     parser.add_argument('--n_way', type=int, default=5)
     parser.add_argument('--n_shot', type=int, default=1)
     parser.add_argument('--n_aug_support_samples',type=int, default=1)
     parser.add_argument('--n_queries', type=int, default=15)
-    # parser.add_argument('--temperature', type=float, default=12.5)
-    # parser.add_argument('--metric', type=str, default='cosine')
     parser.add_argument('--n_episodes', type=int, default=1000)
-    # parser.add_argument('--n_local_proto', default=3, type=int)
     parser.add_argument('--num_workers', default=2, type=int)
-    #  test_batch_size is 1  maen  1 episode of fsl
+    #  test_batch_size is 1  mean  1 episode of fsl
     parser.add_argument('--test_batch_size',default=1)
 
     # setting
@@ -63,7 +57,6 @@ def parse_option():
     parser.add_argument('--model_type',default='best',choices=['best','last'])
     parser.add_argument('--seed', default=1, type=int)
     parser.add_argument('--no_save_model', default=False, action='store_true')
-    # parser.add_argument('--feature_pyramid', default=False, action='store_true')
     parser.add_argument('--method',default='local_proto',choices=['local_proto','good_metric','stl_deepbdc','confusion','WinSA'])
     parser.add_argument('--distill_model', default=None,type=str,help='about distillation model path')
     parser.add_argument('--penalty_c', default=1.0, type=float)
@@ -71,7 +64,6 @@ def parse_option():
     parser.add_argument('--test_times', default=1, type=int)
 
     # confusion representation:
-    # parser.add_argument('--no_diag', default=False, action='store_true')
     parser.add_argument('--confusion', default=False, action='store_true')
     parser.add_argument('--n_symmetry_aug', default=1, type=int)
     parser.add_argument('--prompt', default=False, action='store_true')
@@ -94,7 +86,6 @@ def parse_option():
     parser.add_argument('--alpha', default=0.5 , type=float)
     parser.add_argument('--sim_temperature', default=64 , type=float)
     parser.add_argument('--measure', default='cosine', choices=['cosine','eudist'])
-
 
 
     args = parser.parse_args()
@@ -141,8 +132,6 @@ def main():
     json_file_read = False
     if args.dataset == 'cub':
         novel_file = 'novel.json'
-        # novel_file = 'val.json'
-        # novel_file = 'base.json'
         json_file_read = True
     else:
         novel_file = 'test'
@@ -172,7 +161,7 @@ def main():
     if args.all_mini:
         num_classes = 100
 
-    model = Net_rec(args,num_classes=num_classes).cuda()
+    model = FeatWalk_Net(args,num_classes=num_classes).cuda()
     model = load_model(model,os.path.join(args.save_dir,args.distill_model))
 
     print("-"*20+"  start meta test...  "+"-"*20)
